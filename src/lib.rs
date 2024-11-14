@@ -70,7 +70,7 @@ impl Retry {
     fn apply_jitter(&self, delay: Duration) -> Duration {
         if self.enable_jitter {
             // [0.5, 1.0)
-            delay.mul_f64(0.5 + rand::random::<f64>() / 2.0)
+            delay.mul_f64(0.5 + fastrand::f64() / 2.0)
         } else {
             delay
         }
