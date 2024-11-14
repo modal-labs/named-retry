@@ -9,7 +9,8 @@ use named_retry::Retry;
 let retry = Retry::new("test")
     .attempts(5)
     .base_delay(Duration::from_secs(1))
-    .delay_factor(2.0);
+    .delay_factor(2.0)
+    .jitter(true);
 
 let result = retry.run(|| async { Ok::<_, ()>("done!") }).await;
 assert_eq!(result, Ok("done!"));

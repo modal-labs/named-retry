@@ -26,6 +26,9 @@ pub struct Retry {
 
     /// Exponential factor to increase the delay by on each attempt.
     pub delay_factor: f64,
+
+    /// If true, the delay will be selected randomly from the range [delay/2, delay).
+    pub enable_jitter: bool,
 }
 
 impl Retry {
@@ -36,6 +39,7 @@ impl Retry {
             attempts: 3,
             base_delay: Duration::ZERO,
             delay_factor: 1.0,
+            enable_jitter: false,
         }
     }
 
@@ -55,6 +59,21 @@ impl Retry {
     pub const fn delay_factor(mut self, delay_factor: f64) -> Self {
         self.delay_factor = delay_factor;
         self
+    }
+
+    /// Enable jitter.
+    pub const fn jitter(mut self, enabled: bool) -> Self {
+        self.enable_jitter = enabled;
+        self
+    }
+
+    fn apply_jitter(&self, delay: Duration) -> Duration {
+        if self.enable_jitter {
+            // [0.5, 1.0)
+            delay.mul_f64(0.5 + fastrand::f64() / 2.0)
+        } else {
+            delay
+        }
     }
 
     /// Run a falliable asynchronous function using this retry configuration.
@@ -77,7 +96,7 @@ impl Retry {
                 Err(err) if i == self.attempts - 1 => return Err(err),
                 Err(err) => {
                     warn!(?err, "failed retryable operation {}, retrying", self.name);
-                    time::sleep(delay).await;
+                    time::sleep(self.apply_jitter(delay)).await;
                     delay = delay.mul_f64(self.delay_factor);
                 }
             }
@@ -151,6 +170,33 @@ mod tests {
             });
         let result = task.await;
         assert_eq!(count, 4);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_retry_with_jitter() {
+        let start = Instant::now();
+
+        let mut count = 0;
+        // Earliest possible retry is 0s, 50ms, 525ms, 5.525s
+        let task = Retry::new("test_jitter")
+            .attempts(4)
+            .base_delay(Duration::from_millis(100))
+            .delay_factor(10.0)
+            .jitter(true)
+            .run(|| {
+                count += 1;
+                async {
+                    println!("elapsed = {:?}", start.elapsed());
+                    if start.elapsed() < Duration::from_millis(500) {
+                        Err::<(), ()>(())
+                    } else {
+                        Ok(())
+                    }
+                }
+            });
+        let result = task.await;
+        assert_eq!(count, 3);
         assert!(result.is_ok());
     }
 }
