@@ -1,7 +1,6 @@
 //! Utilities for retrying falliable, asynchronous operations.
 
 use std::fmt::Debug;
-use std::future::Future;
 use std::time::Duration;
 
 use tokio::time;
@@ -80,10 +79,10 @@ impl Retry {
     ///
     /// Panics if the number of attempts is set to `0`, or the base delay is
     /// incorrectly set to a negative duration.
-    pub async fn run<T, E: Debug, Fut>(self, mut func: impl FnMut() -> Fut) -> Result<T, E>
-    where
-        Fut: Future<Output = Result<T, E>>,
-    {
+    pub async fn run<T, E: Debug>(
+        self,
+        mut func: impl AsyncFnMut() -> Result<T, E>,
+    ) -> Result<T, E> {
         assert!(self.attempts > 0, "attempts must be greater than 0");
         assert!(
             self.base_delay >= Duration::ZERO && self.delay_factor >= 0.0,
@@ -118,16 +117,16 @@ mod tests {
     async fn zero_retry_attempts() {
         let _ = Retry::new("test")
             .attempts(0)
-            .run(|| async { Ok::<_, std::io::Error>(()) })
+            .run(async || Ok::<_, std::io::Error>(()))
             .await;
     }
 
     #[tokio::test]
     async fn successful_retry() {
         let mut count = 0;
-        let task = Retry::new("test").run(|| {
+        let task = Retry::new("test").run(async || {
             count += 1;
-            async { Ok::<_, std::io::Error>(()) }
+            Ok::<_, std::io::Error>(())
         });
         let result = task.await;
         assert_eq!(count, 1);
@@ -138,9 +137,9 @@ mod tests {
     async fn failed_retry() {
         let mut count = 0;
         let retry = Retry::new("test");
-        let task = retry.run(|| {
+        let task = retry.run(async || {
             count += 1;
-            async { Err::<(), ()>(()) }
+            Err::<(), ()>(())
         });
         let result = task.await;
         assert_eq!(count, retry.attempts);
@@ -157,15 +156,13 @@ mod tests {
             .attempts(5)
             .base_delay(Duration::from_secs(1))
             .delay_factor(2.0)
-            .run(|| {
+            .run(async || {
                 count += 1;
-                async {
-                    println!("elapsed = {:?}", start.elapsed());
-                    if start.elapsed() < Duration::from_secs(5) {
-                        Err::<(), ()>(())
-                    } else {
-                        Ok(())
-                    }
+                println!("elapsed = {:?}", start.elapsed());
+                if start.elapsed() < Duration::from_secs(5) {
+                    Err::<(), ()>(())
+                } else {
+                    Ok(())
                 }
             });
         let result = task.await;
@@ -184,15 +181,13 @@ mod tests {
             .base_delay(Duration::from_millis(100))
             .delay_factor(10.0)
             .jitter(true)
-            .run(|| {
+            .run(async || {
                 count += 1;
-                async {
-                    println!("elapsed = {:?}", start.elapsed());
-                    if start.elapsed() < Duration::from_millis(500) {
-                        Err::<(), ()>(())
-                    } else {
-                        Ok(())
-                    }
+                println!("elapsed = {:?}", start.elapsed());
+                if start.elapsed() < Duration::from_millis(500) {
+                    Err::<(), ()>(())
+                } else {
+                    Ok(())
                 }
             });
         let result = task.await;
