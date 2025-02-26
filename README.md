@@ -12,6 +12,6 @@ let retry = Retry::new("test")
     .delay_factor(2.0)
     .jitter(true);
 
-let result = retry.run(|| async { Ok::<_, ()>("done!") }).await;
+let result = retry.run(async || { Ok::<_, ()>("done!") }).await;
 assert_eq!(result, Ok("done!"));
 ```
