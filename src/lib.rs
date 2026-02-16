@@ -75,28 +75,80 @@ impl Retry {
         }
     }
 
+    /// Set a custom error handler, returning a [`RetryWith`] that can be
+    /// [`run`](RetryWith::run).
+    ///
+    /// The handler receives the error (by value), the 1-indexed attempt
+    /// number that just failed, and the total number of attempts configured.
+    ///
+    /// This should be the last builder method before calling `run`.
+    pub fn on_error<F>(self, handler: F) -> RetryWith<F> {
+        RetryWith {
+            inner: self,
+            on_error: handler,
+        }
+    }
+
     /// Run a falliable asynchronous function using this retry configuration.
+    ///
+    /// Failed attempts are logged at `warn` level via `tracing`. To customize
+    /// error handling, use [`on_error`](Self::on_error) instead.
     ///
     /// Panics if the number of attempts is set to `0`, or the base delay is
     /// incorrectly set to a negative duration.
     pub async fn run<T, E: Debug>(
         self,
-        mut func: impl AsyncFnMut() -> Result<T, E>,
+        func: impl AsyncFnMut() -> Result<T, E>,
     ) -> Result<T, E> {
-        assert!(self.attempts > 0, "attempts must be greater than 0");
+        let name = self.name;
+        self.on_error(|err: E, _attempt, _total| {
+            warn!(?err, "failed retryable operation {}, retrying", name);
+        })
+        .run(func)
+        .await
+    }
+}
+
+/// A [`Retry`] paired with a custom error handler. Created by
+/// [`Retry::on_error`].
+pub struct RetryWith<F> {
+    inner: Retry,
+    on_error: F,
+}
+
+impl<F> RetryWith<F> {
+    /// Run a falliable asynchronous function using this retry configuration.
+    ///
+    /// Unlike [`Retry::run`], this does not require `E: Debug` since error
+    /// formatting is delegated to the custom error handler.
+    ///
+    /// Panics if the number of attempts is set to `0`, or the base delay is
+    /// incorrectly set to a negative duration.
+    pub async fn run<T, E>(
+        self,
+        mut func: impl AsyncFnMut() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        F: FnMut(E, u32, u32),
+    {
+        let Self {
+            inner,
+            mut on_error,
+        } = self;
+        assert!(inner.attempts > 0, "attempts must be greater than 0");
         assert!(
-            self.base_delay >= Duration::ZERO && self.delay_factor >= 0.0,
+            inner.base_delay >= Duration::ZERO && inner.delay_factor >= 0.0,
             "retry delay cannot be negative"
         );
-        let mut delay = self.base_delay;
-        for i in 0..self.attempts {
+        let mut delay = inner.base_delay;
+        for i in 0..inner.attempts {
             match func().await {
                 Ok(value) => return Ok(value),
-                Err(err) if i == self.attempts - 1 => return Err(err),
+                Err(err) if i == inner.attempts - 1 => return Err(err),
                 Err(err) => {
-                    warn!(?err, "failed retryable operation {}, retrying", self.name);
-                    time::sleep(self.apply_jitter(delay)).await;
-                    delay = delay.mul_f64(self.delay_factor);
+                    on_error(err, i + 1, inner.attempts);
+                    time::sleep(inner.apply_jitter(delay)).await;
+                    delay = delay.mul_f64(inner.delay_factor);
                 }
             }
         }
@@ -167,6 +219,65 @@ mod tests {
             });
         let result = task.await;
         assert_eq!(count, 4);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn custom_error_handler() {
+        let mut errors: Vec<(u32, u32)> = Vec::new();
+        let mut count = 0;
+        let result = Retry::new("test")
+            .on_error(|_err: &str, attempt, total| {
+                errors.push((attempt, total));
+            })
+            .run(async || {
+                count += 1;
+                if count < 3 {
+                    Err::<(), &str>("boom")
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(errors, vec![(1, 3), (2, 3)]);
+    }
+
+    #[tokio::test]
+    async fn silent_error_handler() {
+        let mut count = 0;
+        let result = Retry::new("silent")
+            .on_error(|_: (), _, _| {})
+            .run(async || {
+                count += 1;
+                if count < 3 {
+                    Err::<(), ()>(())
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn error_handler_no_debug_bound() {
+        struct OpaqueError;
+
+        let mut count = 0;
+        let result = Retry::new("opaque")
+            .attempts(2)
+            .on_error(|_: OpaqueError, _, _| {})
+            .run(async || {
+                count += 1;
+                if count < 2 {
+                    Err::<(), _>(OpaqueError)
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
         assert!(result.is_ok());
     }
 
