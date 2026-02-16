@@ -96,10 +96,7 @@ impl Retry {
     ///
     /// Panics if the number of attempts is set to `0`, or the base delay is
     /// incorrectly set to a negative duration.
-    pub async fn run<T, E: Debug>(
-        self,
-        func: impl AsyncFnMut() -> Result<T, E>,
-    ) -> Result<T, E> {
+    pub async fn run<T, E: Debug>(self, func: impl AsyncFnMut() -> Result<T, E>) -> Result<T, E> {
         let name = self.name;
         self.on_error(|err: E, _attempt, _total| {
             warn!(?err, "failed retryable operation {}, retrying", name);
@@ -124,10 +121,7 @@ impl<F> RetryWith<F> {
     ///
     /// Panics if the number of attempts is set to `0`, or the base delay is
     /// incorrectly set to a negative duration.
-    pub async fn run<T, E>(
-        self,
-        mut func: impl AsyncFnMut() -> Result<T, E>,
-    ) -> Result<T, E>
+    pub async fn run<T, E>(self, mut func: impl AsyncFnMut() -> Result<T, E>) -> Result<T, E>
     where
         F: FnMut(E, u32, u32),
     {
@@ -250,11 +244,7 @@ mod tests {
             .on_error(|_: (), _, _| {})
             .run(async || {
                 count += 1;
-                if count < 3 {
-                    Err::<(), ()>(())
-                } else {
-                    Ok(())
-                }
+                if count < 3 { Err::<(), ()>(()) } else { Ok(()) }
             })
             .await;
         assert!(result.is_ok());
