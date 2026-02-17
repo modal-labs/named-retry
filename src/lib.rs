@@ -1,6 +1,7 @@
 //! Utilities for retrying falliable, asynchronous operations.
 
 use std::fmt::Debug;
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use tokio::time;
@@ -80,6 +81,8 @@ impl Retry {
     ///
     /// The handler receives the error (by value), the 1-indexed attempt
     /// number that just failed, and the total number of attempts configured.
+    /// It returns [`ControlFlow::Continue`] to retry or [`ControlFlow::Break`]
+    /// with the error to stop immediately.
     ///
     /// This should be the last builder method before calling `run`.
     pub fn on_error<F>(self, handler: F) -> RetryWith<F> {
@@ -100,6 +103,7 @@ impl Retry {
         let name = self.name;
         self.on_error(|err: E, _attempt, _total| {
             warn!(?err, "failed retryable operation {}, retrying", name);
+            ControlFlow::Continue(())
         })
         .run(func)
         .await
@@ -119,11 +123,14 @@ impl<F> RetryWith<F> {
     /// Unlike [`Retry::run`], this does not require `E: Debug` since error
     /// formatting is delegated to the custom error handler.
     ///
+    /// The error handler can return [`ControlFlow::Break`] to stop retrying
+    /// early, or [`ControlFlow::Continue`] to proceed with the next attempt.
+    ///
     /// Panics if the number of attempts is set to `0`, or the base delay is
     /// incorrectly set to a negative duration.
     pub async fn run<T, E>(self, mut func: impl AsyncFnMut() -> Result<T, E>) -> Result<T, E>
     where
-        F: FnMut(E, u32, u32),
+        F: FnMut(E, u32, u32) -> ControlFlow<E>,
     {
         let Self {
             inner,
@@ -140,7 +147,10 @@ impl<F> RetryWith<F> {
                 Ok(value) => return Ok(value),
                 Err(err) if i == inner.attempts - 1 => return Err(err),
                 Err(err) => {
-                    on_error(err, i + 1, inner.attempts);
+                    match on_error(err, i + 1, inner.attempts) {
+                        ControlFlow::Break(err) => return Err(err),
+                        ControlFlow::Continue(()) => {}
+                    }
                     time::sleep(inner.apply_jitter(delay)).await;
                     delay = delay.mul_f64(inner.delay_factor);
                 }
@@ -157,6 +167,7 @@ mod tests {
     use tokio::time::Instant;
 
     use super::Retry;
+    use std::ops::ControlFlow;
 
     #[tokio::test]
     #[should_panic]
@@ -223,6 +234,7 @@ mod tests {
         let result = Retry::new("test")
             .on_error(|_err: &str, attempt, total| {
                 errors.push((attempt, total));
+                ControlFlow::Continue(())
             })
             .run(async || {
                 count += 1;
@@ -241,7 +253,7 @@ mod tests {
     async fn silent_error_handler() {
         let mut count = 0;
         let result = Retry::new("silent")
-            .on_error(|_: (), _, _| {})
+            .on_error(|_: (), _, _| ControlFlow::Continue(()))
             .run(async || {
                 count += 1;
                 if count < 3 { Err::<(), ()>(()) } else { Ok(()) }
@@ -258,7 +270,7 @@ mod tests {
         let mut count = 0;
         let result = Retry::new("opaque")
             .attempts(2)
-            .on_error(|_: OpaqueError, _, _| {})
+            .on_error(|_: OpaqueError, _, _| ControlFlow::Continue(()))
             .run(async || {
                 count += 1;
                 if count < 2 {
@@ -269,6 +281,31 @@ mod tests {
             })
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn error_handler_aborts_early() {
+        let mut count = 0;
+        let result = Retry::new("abort")
+            .attempts(5)
+            .on_error(|err: String, _attempt, _total| {
+                if err == "permanent" {
+                    ControlFlow::Break(err)
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .run(async || {
+                count += 1;
+                if count == 1 {
+                    Err::<(), _>("transient".to_string())
+                } else {
+                    Err("permanent".to_string())
+                }
+            })
+            .await;
+        assert_eq!(count, 2);
+        assert_eq!(result, Err("permanent".to_string()));
     }
 
     #[tokio::test(start_paused = true)]
