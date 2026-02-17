@@ -15,3 +15,22 @@ let retry = Retry::new("test")
 let result = retry.run(async || { Ok::<_, ()>("done!") }).await;
 assert_eq!(result, Ok("done!"));
 ```
+
+By default, failed attempts are logged at `warn` level via `tracing`. Use `on_error` to customize error handling, for example when polling where some errors are expected:
+
+```rust
+use std::ops::ControlFlow;
+use tracing::debug;
+
+let result = Retry::new("poll")
+    .attempts(10)
+    .base_delay(Duration::from_secs(1))
+    .on_error(|err, _attempt, _total| {
+        debug!(?err, "not ready yet");
+        ControlFlow::Continue(())
+    })
+    .run(async || { Ok::<_, ()>("done!") })
+    .await;
+```
+
+The error handler can also abort retries early by returning `ControlFlow::Break(err)`.
